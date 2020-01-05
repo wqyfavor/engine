@@ -36,3 +36,4 @@ part 'pointer.dart';
 part 'semantics.dart';
 part 'text.dart';
 part 'window.dart';
+part 'alicdn_image/alicdn_image.dart';

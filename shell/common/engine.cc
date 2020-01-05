@@ -25,6 +25,7 @@
 #include "third_party/dart/runtime/include/dart_tools_api.h"
 #include "third_party/skia/include/core/SkCanvas.h"
 #include "third_party/skia/include/core/SkPictureRecorder.h"
+#include "flutter/lib/ui/alicdn_image/alicdn_image_codec.h"
 
 namespace flutter {
 
@@ -55,6 +56,9 @@ Engine::Engine(Delegate& delegate,
                      io_manager),
       task_runners_(std::move(task_runners)),
       weak_factory_(this) {
+  
+  InitializeAliCDNImageManager(task_runners, vm.GetConcurrentWorkerTaskRunner(), io_manager);
+          
   // Runtime controller is initialized here because it takes a reference to this
   // object as its delegate. The delegate may be called in the constructor and
   // we want to be fully initilazed by that point.

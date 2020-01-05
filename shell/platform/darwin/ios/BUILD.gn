@@ -10,6 +10,7 @@ import("$flutter_root/common/config.gni")
 import("$flutter_root/shell/gpu/gpu.gni")
 import("$flutter_root/shell/platform/darwin/common/framework_shared.gni")
 import("$flutter_root/testing/testing.gni")
+import("$flutter_root/lib/ui/alicdn_image/alicdn_image.gni")
 
 _flutter_framework_dir = "$root_out_dir/Flutter.framework"
 
@@ -184,7 +185,7 @@ action("copy_framework_headers") {
   script = "$flutter_root/sky/tools/install_framework_headers.py"
   visibility = [ ":*" ]
   sources = get_path_info(_flutter_framework_headers, "abspath") +
-            framework_shared_headers
+            framework_shared_headers + alicdn_image_public_headers
   outputs = []
   foreach(header, sources) {
     header_basename = get_path_info(header, "file")

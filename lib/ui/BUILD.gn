@@ -5,6 +5,7 @@
 import("//build/fuchsia/sdk.gni")
 import("$flutter_root/common/config.gni")
 import("$flutter_root/testing/testing.gni")
+import("$flutter_root/lib/ui/alicdn_image/alicdn_image.gni")
 
 source_set("ui") {
   sources = [
@@ -108,6 +109,8 @@ source_set("ui") {
     "window/window.cc",
     "window/window.h",
   ]
+
+  sources += alicdn_image_sources
 
   public_configs = [ "$flutter_root:config" ]
 

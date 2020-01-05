@@ -36,6 +36,8 @@
 #include "flutter/lib/ui/compositing/scene_host.h"
 #endif
 
+#include "flutter/lib/ui/alicdn_image/alicdn_image_codec.h"
+
 using tonic::ToDart;
 
 namespace flutter {
@@ -97,6 +99,7 @@ void DartUI::InitForGlobal() {
 #if defined(OS_FUCHSIA)
     SceneHost::RegisterNatives(g_natives);
 #endif
+    AliCDNImageFrameCodec::RegisterNatives(g_natives);
 
     // Secondary isolates do not provide UI-related APIs.
     g_natives_secondary = new tonic::DartLibraryNatives();
