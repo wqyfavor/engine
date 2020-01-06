@@ -112,7 +112,7 @@ AliCDNImageFrameCodec::AliCDNImageFrameCodec(std::unique_ptr<AliCDNImageAdapter:
 }
 
 AliCDNImageFrameCodec::~AliCDNImageFrameCodec() {
-  printf("");
+  cancel();
 }
 
 int AliCDNImageFrameCodec::frameCount() const {
@@ -128,22 +128,31 @@ Dart_Handle AliCDNImageFrameCodec::getNextFrame(Dart_Handle callback) {
     return tonic::ToDart("Callback must be a function");
   }
   
-  // Frame already cached(uploaded to GPU).
   if (status_ == Status::Complete) {
     if (platformImage_.frameCount > 1) {
-      // TODO, gif
+      // Multiframe images. We do not cache frame, always do decoding progressively.
+      if (platformImage_.handle == 0) {
+        // Fail to get platform GIF image instance.
+        tonic::DartInvoke(callback, {Dart_Null()});
+      }
+      else if (callback) {
+        getNextMultiframe(callback);
+      }
+      return Dart_Null();
+    }
+    else if (cachedFrame_) {
+      tonic::DartInvoke(callback, {tonic::ToDart(cachedFrame_)});
+      return Dart_Null();
     }
     else {
-      if (!cachedFrame_) {
-        // TODO, image might be failed.
-      }
-      tonic::DartInvoke(callback, {tonic::ToDart(cachedFrame_)});
+      // This should never happen. But if did happen, we change status to New and restart downloading image.
+      status_ = Status::New;
     }
-    return Dart_Null();
   }
   
   auto dartState = UIDartState::Current();
 
+  // Keep the callback as persistent value and record VM state.
   callbacks_.emplace_back(dartState, callback);
 
   if (status_ == Status::Downloading) {
@@ -181,19 +190,22 @@ Dart_Handle AliCDNImageFrameCodec::getNextFrame(Dart_Handle callback) {
     else {
       // Keep platform image info.
       (*codecRef)->platformImage_ = image;
+      (*codecRef)->releasePlatformImageCallback_ = release; // For GIF image, we must keep the platform image instance.
       
-      // Decode the image asynchronously on worker thread.
-      alicdn_image_manager->concurrentRunner()->PostTask([image, codecRef, releasePlatformImage = release] () {
+      if (image.frameCount > 1) {
+        (*codecRef)->getNextMultiframe(nullptr);
+        return;
+      }
+      
+      // Decode single image asynchronously on worker thread.
+      alicdn_image_manager->concurrentRunner()->PostTask([image, codecRef] () {
         auto decodeResult = alicdn_image_adapter->decode(image); // Synchronous decode
         AliCDNImageAdapter::Bitmap& bitmap = decodeResult.first;
         AliCDNImageAdapter::ReleaseBitmapCallback& releaseBitmap = decodeResult.second;
         
         if (bitmap.pixels == nullptr) {
-          
-          // Release platform image such as UIImage.
-          if (releasePlatformImage) {
-            releasePlatformImage(image.handle);
-          }
+          // Decoding failed, release platform image such as UIImage.
+          (*codecRef)->releasePlatformImage();
           
           alicdn_image_manager->runners().GetUITaskRunner()->PostTask([codecRef] {
             // Keep ref of codec instance until UI task finishes.
@@ -214,9 +226,7 @@ Dart_Handle AliCDNImageFrameCodec::getNextFrame(Dart_Handle callback) {
         }
         else {
           // Upload the bitmap to GPU on IO thread.
-          alicdn_image_manager->runners().GetIOTaskRunner()->PostTask([image, releasePlatformImage,
-                                                                       bitmap, releaseBitmap,
-                                                                       codecRef] () {
+          alicdn_image_manager->runners().GetIOTaskRunner()->PostTask([bitmap, releaseBitmap, codecRef] () {
             auto ioManager = alicdn_image_manager->ioManager();
             bool ioStatusValid = ioManager && ioManager->GetResourceContext() && ioManager->GetSkiaUnrefQueue();
             
@@ -225,17 +235,15 @@ Dart_Handle AliCDNImageFrameCodec::getNextFrame(Dart_Handle callback) {
               uploaded = UploadTexture(bitmap);
             }
             
-            // Release pixels.
+            // Release pixels, because pixels might be copied besides platform image instance.
             if (releaseBitmap) {
               releaseBitmap(bitmap);
             }
             
-            // Release platform image such as UIImage.
-            if (releasePlatformImage) {
-              releasePlatformImage(image.handle);
-            }
+            // All done, release platform image instance such as UIImage.
+            (*codecRef)->releasePlatformImage();
             
-            // Go back to UI thread.
+            // Go back to UI thread and notify dart widgets.
             alicdn_image_manager->runners().GetUITaskRunner()->PostTask(fml::MakeCopyable([codecRef,
                                                                          textureImage = std::move(uploaded)] () mutable {
               // Keep ref of codec instance until UI task finishes.
@@ -252,7 +260,6 @@ Dart_Handle AliCDNImageFrameCodec::getNextFrame(Dart_Handle callback) {
               if (textureImage.get()) {
                 auto canvasImage = fml::MakeRefCounted<CanvasImage>();
                 canvasImage->set_image(std::move(textureImage));
-
                 codec->cachedFrame_ = fml::MakeRefCounted<FrameInfo>(std::move(canvasImage), 0 /* duration */);
               }
               
@@ -280,8 +287,124 @@ void AliCDNImageFrameCodec::cancel() {
     alicdn_image_adapter->cancel(requestId_);
   }
   
+  releasePlatformImage(); // For GIF, we also need to release platform image instance.
   cachedFrame_ = nullptr; // Release the texture.
   status_ = Status::Complete;
+}
+
+void AliCDNImageFrameCodec::releasePlatformImage() {
+  if (platformImage_.handle != 0 && releasePlatformImageCallback_) {
+    releasePlatformImageCallback_(platformImage_.handle);
+  }
+  platformImage_.handle = 0;
+  releasePlatformImageCallback_ = nullptr;
+}
+
+void AliCDNImageFrameCodec::getNextMultiframe(Dart_Handle callback) {
+  std::shared_ptr<DartPersistentValue> uniqueCallbackState;
+  if (callback) {
+    // Have callback means decode for only one callback listener.
+    FML_DCHECK(alicdn_image_manager->runners().GetUITaskRunner()->RunsTasksOnCurrentThread());
+    uniqueCallbackState = std::make_shared<DartPersistentValue>(tonic::DartState::Current(), callback);
+  }
+  else if (callbacks_.empty()) {
+    return;
+  }
+   
+  // Make sure that self is only deallocated on UI thread.
+  fml::RefPtr<AliCDNImageFrameCodec>* codecRef = new fml::RefPtr<AliCDNImageFrameCodec>(this);
+  alicdn_image_manager->concurrentRunner()->PostTask([codecRef,
+                                                      frameIndex = nextFrameIndex_,
+                                                      uniqueCallbackState] () {
+    auto decodeResult = alicdn_image_adapter->decode((*codecRef)->platformImage_, frameIndex); // Synchronous decode specific frame
+    AliCDNImageAdapter::Bitmap& bitmap = decodeResult.first;
+    AliCDNImageAdapter::ReleaseBitmapCallback& releaseBitmap = decodeResult.second;
+    
+    if (bitmap.pixels == nullptr) {
+      // Decoding failed, release platform image such as UIImage.
+      (*codecRef)->releasePlatformImage();
+      
+      alicdn_image_manager->runners().GetUITaskRunner()->PostTask([codecRef, uniqueCallbackState] {
+        // Keep ref of codec instance until UI task finishes.
+        std::unique_ptr<fml::RefPtr<AliCDNImageFrameCodec>> innerCodecRef(codecRef);
+        fml::RefPtr<AliCDNImageFrameCodec> codec(std::move(*innerCodecRef));
+        codec->status_ = Status::Complete; // Complete but failed.
+        auto state = uniqueCallbackState ? uniqueCallbackState->dart_state().lock() :
+          codec->callbacks_.front().dart_state().lock();
+        if (!state) {
+          return;
+        }
+        tonic::DartState::Scope scope(state.get());
+        Dart_Handle nullFrame = Dart_Null();
+        if (uniqueCallbackState) {
+          tonic::DartInvoke(uniqueCallbackState->value(), {nullFrame});
+        }
+        else {
+          for (const DartPersistentValue& callback : codec->callbacks_) {
+            tonic::DartInvoke(callback.value(), {nullFrame});
+          }
+          codec->callbacks_.clear();
+        }
+      });
+    }
+    else {
+      // Upload the bitmap to GPU on IO thread.
+      alicdn_image_manager->runners().GetIOTaskRunner()->PostTask([bitmap, releaseBitmap, codecRef,
+                                                                   uniqueCallbackState] () {
+        auto ioManager = alicdn_image_manager->ioManager();
+        bool ioStatusValid = ioManager && ioManager->GetResourceContext() && ioManager->GetSkiaUnrefQueue();
+        
+        SkiaGPUObject<SkImage> uploaded;
+        if (ioStatusValid) {
+          uploaded = UploadTexture(bitmap);
+        }
+        
+        // Release pixels, because pixels might be copied besides platform image instance.
+        if (releaseBitmap) {
+          releaseBitmap(bitmap);
+        }
+        
+        // Go back to UI thread and notify dart widgets.
+        alicdn_image_manager->runners().GetUITaskRunner()->PostTask(fml::MakeCopyable([codecRef,
+                                                                                       textureImage = std::move(uploaded),
+                                                                                       uniqueCallbackState] () mutable {
+          // Keep ref of codec instance until UI task finishes.
+          std::unique_ptr<fml::RefPtr<AliCDNImageFrameCodec>> innerCodecRef(codecRef);
+          fml::RefPtr<AliCDNImageFrameCodec> codec(std::move(*innerCodecRef));
+          codec->status_ = Status::Complete; // Complete
+          auto state = uniqueCallbackState ? uniqueCallbackState->dart_state().lock() :
+            codec->callbacks_.front().dart_state().lock();
+          if (!state) {
+            return;
+          }
+          tonic::DartState::Scope scope(state.get());
+          
+          // Convert to frame with duration info.
+          fml::RefPtr<FrameInfo> frameInfo = NULL;
+          if (textureImage.get()) {
+            auto canvasImage = fml::MakeRefCounted<CanvasImage>();
+            canvasImage->set_image(std::move(textureImage));
+            frameInfo = fml::MakeRefCounted<FrameInfo>(std::move(canvasImage),
+                                                       codec->platformImage_.durationInMs /
+                                                       codec->platformImage_.frameCount);
+          }
+          
+          Dart_Handle frame = tonic::ToDart(frameInfo);
+          if (uniqueCallbackState) {
+            tonic::DartInvoke(uniqueCallbackState->value(), {frame});
+          }
+          else {
+            for (const DartPersistentValue& callback : codec->callbacks_) {
+              tonic::DartInvoke(callback.value(), {frame});
+            }
+            codec->callbacks_.clear();
+          }
+        }));
+      });
+    }
+  });
+  
+  nextFrameIndex_ = (nextFrameIndex_ + 1) % platformImage_.frameCount;
 }
 
 /*
@@ -382,10 +505,6 @@ static void AliCDNInstantiateImageCodec(Dart_NativeArguments args) {
       Dart_SetReturnValue(args, tonic::ToDart("Invalid extraInfo."));
       return;
     }
-  }
-  
-  if (descriptor->url.empty()) {
-    // TODO
   }
   
   // Return cdn codec.

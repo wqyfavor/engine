@@ -58,10 +58,11 @@ public:
   };
   
   using PlatformHandle = uintptr_t;
+  static constexpr int InfiniteLoop = -1;
   struct PlatformImage {
     PlatformHandle handle = 0;
     int frameCount = 1; // for multiframe image
-    int repetitionCount = 0; // 0 means infinite.
+    int repetitionCount = InfiniteLoop; // -1 means infinite.
     int durationInMs = 0; // in milliseconds
   };
   
@@ -69,14 +70,13 @@ public:
   enum class ColorType { RGBA8888, BGRA8888, RGB565, ARGB4444, Alpha8 };
   
   struct Bitmap {
-    void* pixels;
-    int width;
-    int height;
+    void* pixels = nullptr;
+    int width = 0;
+    int height = 0;
     AlphaType alphaType;
     ColorType colorType;
-    size_t bytesPerRow;
-    size_t bytesPerPixel;
-    void* userData;
+    size_t bytesPerRow = 0;
+    void* userData = nullptr;
   };
   
   using RequestId = unsigned long;
@@ -89,7 +89,7 @@ public:
                        RequestCallback&& callback) = 0;
   virtual void cancel(RequestId rid) = 0;
   
-  virtual std::pair<Bitmap, ReleaseBitmapCallback> decode(PlatformImage image) = 0;
+  virtual std::pair<Bitmap, ReleaseBitmapCallback> decode(PlatformImage image, int frameIndex = 0) = 0;
 };
 
 ALICDN_IMAGE_EXPORT extern void SetAliCDNImageAdapter(AliCDNImageAdapter* adapter);

@@ -44,12 +44,16 @@ private:
   // Platform image info.
   AliCDNImageAdapter::RequestId requestId_;
   AliCDNImageAdapter::PlatformImage platformImage_;
+  AliCDNImageAdapter::ReleaseImageCallback releasePlatformImageCallback_;
   
   // For multiframe images.
   int nextFrameIndex_ = 0;
 
   FML_FRIEND_MAKE_REF_COUNTED(AliCDNImageFrameCodec);
   FML_FRIEND_REF_COUNTED_THREAD_SAFE(AliCDNImageFrameCodec);
+  
+  void releasePlatformImage();
+  void getNextMultiframe(Dart_Handle callback);
 };
 
 extern void InitializeAliCDNImageManager(const TaskRunners& runners,
