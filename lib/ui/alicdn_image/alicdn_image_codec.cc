@@ -2,7 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "flutter/lib/ui/alicdn_image/alicdn_image_codec.h"
+#include "alicdn_image_codec.h"
+#include "alicdn_decode_coordinator.h"
 #include "third_party/tonic/logging/dart_invoke.h"
 #include "third_party/tonic/dart_library_natives.h"
 #include "third_party/tonic/dart_binding_macros.h"
@@ -34,31 +35,49 @@ static SkAlphaType ConvertAlphaType(AliCDNImageAdapter::AlphaType source) {
   }
 }
 
+class AliCDNImageAdapter;
+class AliCDNImageManager;
+
+static AliCDNImageAdapter* alicdn_image_adapter;
+static AliCDNImageManager* alicdn_image_manager;
+
 class AliCDNImageManager {
 public:
   AliCDNImageManager(const TaskRunners& runners,
-                     std::shared_ptr<fml::ConcurrentTaskRunner> concurrent_task_runner,
+                     std::shared_ptr<fml::ConcurrentTaskRunner> concurrentRunner,
                      fml::WeakPtr<IOManager> io_manager)
-  : runners_(std::move(runners)),
-  concurrentTaskRunner_(std::move(concurrent_task_runner)),
-  ioManager_(std::move(io_manager)) {}
+  : concurrentCoordinator_(concurrentRunner),
+  runners_(std::move(runners)), ioManager_(std::move(io_manager)) {}
   
   const TaskRunners& runners() const { return runners_; }
-  std::shared_ptr<fml::ConcurrentTaskRunner> concurrentRunner() const { return concurrentTaskRunner_; }
   fml::WeakPtr<IOManager> ioManager() const { return ioManager_; }
   
   AliCDNImageAdapter::RequestId nextRequestId() { return requestId ++; }
   
+  AliCDNDecodeCoordinator& concurrentCoordinator() { return concurrentCoordinator_; }
+  void evaluateDeviceStatus() {
+    bool shouldEvaluate = !initialDeviceStatusEvaluated_ ||
+      alicdn_image_adapter->shouldEvaluateDeviceStatus();
+    
+    if (shouldEvaluate) {
+      uint32_t cpu;
+      uint64_t memory;
+      alicdn_image_adapter->evaluateDeviceStatus(cpu, memory);
+      concurrentCoordinator_.updateCapacity(cpu, memory);
+      initialDeviceStatusEvaluated_ = true;
+    }
+  }
+  
 private:
   AliCDNImageAdapter::RequestId requestId = 0;
+  
+  bool initialDeviceStatusEvaluated_ = false;
+  AliCDNDecodeCoordinator concurrentCoordinator_;
   
   TaskRunners runners_;
   std::shared_ptr<fml::ConcurrentTaskRunner> concurrentTaskRunner_;
   fml::WeakPtr<IOManager> ioManager_;
 };
-
-static AliCDNImageAdapter* alicdn_image_adapter;
-static AliCDNImageManager* alicdn_image_manager;
 
 void SetAliCDNImageAdapter(AliCDNImageAdapter* adapter) {
   if (alicdn_image_adapter == nullptr) {
@@ -198,12 +217,35 @@ Dart_Handle AliCDNImageFrameCodec::getNextFrame(Dart_Handle callback) {
       }
       
       // Decode single image asynchronously on worker thread.
-      alicdn_image_manager->concurrentRunner()->PostTask([image, codecRef] () {
-        auto decodeResult = alicdn_image_adapter->decode(image); // Synchronous decode
+      uint64_t imageDecodingCost = image.width * image.height * 4; // approximate memory used for decoding
+      alicdn_image_manager->concurrentCoordinator().postTask(imageDecodingCost,
+                                                             [imageDecodingCost, codecRef] () {
+        AliCDNImageAdapter::DecodeResult decodeResult;
+        
+        // Check platform image because it might be released by cancelling.
+        {
+          std::lock_guard<std::recursive_mutex> lock((*codecRef)->platformImageLock_);
+          if ((*codecRef)->platformImage_.handle != 0) {
+            decodeResult = alicdn_image_adapter->decode((*codecRef)->platformImage_); // Synchronous decode in lock.
+          }
+          else {
+            // Tell concurrent runner that previous task finished.
+            alicdn_image_manager->concurrentCoordinator().finishTask(imageDecodingCost);
+            
+            // Decoding failed, release platform image such as UIImage.
+            (*codecRef)->releasePlatformImage();
+            
+            return; // Just return, no need to handle callbacks.
+          }
+        }
+        
         AliCDNImageAdapter::Bitmap& bitmap = decodeResult.first;
         AliCDNImageAdapter::ReleaseBitmapCallback& releaseBitmap = decodeResult.second;
         
         if (bitmap.pixels == nullptr) {
+          // Tell concurrent runner that previous task finished.
+          alicdn_image_manager->concurrentCoordinator().finishTask(imageDecodingCost);
+          
           // Decoding failed, release platform image such as UIImage.
           (*codecRef)->releasePlatformImage();
           
@@ -226,7 +268,7 @@ Dart_Handle AliCDNImageFrameCodec::getNextFrame(Dart_Handle callback) {
         }
         else {
           // Upload the bitmap to GPU on IO thread.
-          alicdn_image_manager->runners().GetIOTaskRunner()->PostTask([bitmap, releaseBitmap, codecRef] () {
+          alicdn_image_manager->runners().GetIOTaskRunner()->PostTask([imageDecodingCost, bitmap, releaseBitmap, codecRef] () {
             auto ioManager = alicdn_image_manager->ioManager();
             bool ioStatusValid = ioManager && ioManager->GetResourceContext() && ioManager->GetSkiaUnrefQueue();
             
@@ -239,6 +281,9 @@ Dart_Handle AliCDNImageFrameCodec::getNextFrame(Dart_Handle callback) {
             if (releaseBitmap) {
               releaseBitmap(bitmap);
             }
+            
+            // Tell concurrent runner that previous task finished.
+            alicdn_image_manager->concurrentCoordinator().finishTask(imageDecodingCost);
             
             // All done, release platform image instance such as UIImage.
             (*codecRef)->releasePlatformImage();
@@ -293,6 +338,7 @@ void AliCDNImageFrameCodec::cancel() {
 }
 
 void AliCDNImageFrameCodec::releasePlatformImage() {
+  std::lock_guard<std::recursive_mutex> lock(platformImageLock_);
   if (platformImage_.handle != 0 && releasePlatformImageCallback_) {
     releasePlatformImageCallback_(platformImage_.handle);
   }
@@ -313,14 +359,39 @@ void AliCDNImageFrameCodec::getNextMultiframe(Dart_Handle callback) {
    
   // Make sure that self is only deallocated on UI thread.
   fml::RefPtr<AliCDNImageFrameCodec>* codecRef = new fml::RefPtr<AliCDNImageFrameCodec>(this);
-  alicdn_image_manager->concurrentRunner()->PostTask([codecRef,
-                                                      frameIndex = nextFrameIndex_,
-                                                      uniqueCallbackState] () {
-    auto decodeResult = alicdn_image_adapter->decode((*codecRef)->platformImage_, frameIndex); // Synchronous decode specific frame
+  
+  uint64_t imageDecodingCost = platformImage_.width * platformImage_.height * 4; // approximate memory used for decoding
+  alicdn_image_manager->concurrentCoordinator().postTask(imageDecodingCost,
+                                                         [codecRef,
+                                                          imageDecodingCost,
+                                                          frameIndex = nextFrameIndex_,
+                                                          uniqueCallbackState] () {
+    AliCDNImageAdapter::DecodeResult decodeResult;
+    
+    // Check platform image because it might be released by cancelling.
+    {
+      std::lock_guard<std::recursive_mutex> lock((*codecRef)->platformImageLock_);
+      if ((*codecRef)->platformImage_.handle != 0) {
+        decodeResult = alicdn_image_adapter->decode((*codecRef)->platformImage_, frameIndex); // Synchronous decode in lock.
+      }
+      else {
+        // Tell concurrent runner that previous task finished.
+        alicdn_image_manager->concurrentCoordinator().finishTask(imageDecodingCost);
+        
+        // Decoding failed, release platform image such as UIImage.
+        (*codecRef)->releasePlatformImage();
+        
+        return; // Just return, no need to handle callbacks.
+      }
+    }
+    
     AliCDNImageAdapter::Bitmap& bitmap = decodeResult.first;
     AliCDNImageAdapter::ReleaseBitmapCallback& releaseBitmap = decodeResult.second;
     
     if (bitmap.pixels == nullptr) {
+      // Tell concurrent runner that previous task finished.
+      alicdn_image_manager->concurrentCoordinator().finishTask(imageDecodingCost);
+      
       // Decoding failed, release platform image such as UIImage.
       (*codecRef)->releasePlatformImage();
       
@@ -349,7 +420,8 @@ void AliCDNImageFrameCodec::getNextMultiframe(Dart_Handle callback) {
     }
     else {
       // Upload the bitmap to GPU on IO thread.
-      alicdn_image_manager->runners().GetIOTaskRunner()->PostTask([bitmap, releaseBitmap, codecRef,
+      alicdn_image_manager->runners().GetIOTaskRunner()->PostTask([imageDecodingCost,
+                                                                   bitmap, releaseBitmap, codecRef,
                                                                    uniqueCallbackState] () {
         auto ioManager = alicdn_image_manager->ioManager();
         bool ioStatusValid = ioManager && ioManager->GetResourceContext() && ioManager->GetSkiaUnrefQueue();
@@ -363,6 +435,9 @@ void AliCDNImageFrameCodec::getNextMultiframe(Dart_Handle callback) {
         if (releaseBitmap) {
           releaseBitmap(bitmap);
         }
+        
+        // Tell concurrent runner that previous task finished.
+        alicdn_image_manager->concurrentCoordinator().finishTask(imageDecodingCost);
         
         // Go back to UI thread and notify dart widgets.
         alicdn_image_manager->runners().GetUITaskRunner()->PostTask(fml::MakeCopyable([codecRef,
@@ -422,6 +497,15 @@ void AliCDNImageFrameCodec::getNextMultiframe(Dart_Handle callback) {
     Map<String, String> extraInfo
  */
 static void AliCDNInstantiateImageCodec(Dart_NativeArguments args) {
+  if (alicdn_image_adapter == nullptr ||
+      alicdn_image_manager == nullptr) {
+    Dart_SetReturnValue(args, tonic::ToDart("Ali CDN image decoder not initialized."));
+    return;
+  }
+  
+  // Reevaluate device status for balanced memory usage.
+  alicdn_image_manager->evaluateDeviceStatus();
+  
   std::unique_ptr<AliCDNImageAdapter::RequestInfo> descriptor =
     std::make_unique<AliCDNImageAdapter::RequestInfo>();
   

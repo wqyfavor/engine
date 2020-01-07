@@ -1,6 +1,8 @@
 alicdn_image_public_headers = get_path_info(["AliCDNImage.h"], "abspath")
 
 alicdn_image_sources = [
+  "$flutter_root/lib/ui/alicdn_image/alicdn_decode_coordinator.cc",
+  "$flutter_root/lib/ui/alicdn_image/alicdn_decode_coordinator.h",
   "$flutter_root/lib/ui/alicdn_image/alicdn_image_codec.cc",
   "$flutter_root/lib/ui/alicdn_image/alicdn_image_codec.h",
   "$flutter_root/lib/ui/alicdn_image/AliCDNImage.h",

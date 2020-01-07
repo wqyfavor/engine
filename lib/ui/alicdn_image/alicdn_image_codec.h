@@ -42,6 +42,7 @@ private:
   std::vector<DartPersistentValue> callbacks_;
   
   // Platform image info.
+  std::recursive_mutex platformImageLock_;
   AliCDNImageAdapter::RequestId requestId_;
   AliCDNImageAdapter::PlatformImage platformImage_;
   AliCDNImageAdapter::ReleaseImageCallback releasePlatformImageCallback_;

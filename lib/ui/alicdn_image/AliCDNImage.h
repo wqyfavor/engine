@@ -61,6 +61,8 @@ public:
   static constexpr int InfiniteLoop = -1;
   struct PlatformImage {
     PlatformHandle handle = 0;
+    int width = 0; // width in pixel
+    int height = 0; // height in pixel
     int frameCount = 1; // for multiframe image
     int repetitionCount = InfiniteLoop; // -1 means infinite.
     int durationInMs = 0; // in milliseconds
@@ -79,17 +81,21 @@ public:
     void* userData = nullptr;
   };
   
-  using RequestId = unsigned long;
+  using RequestId = uint32_t;
   using ReleaseImageCallback = std::function<void(PlatformHandle handle)>;
   using RequestCallback = std::function<void(PlatformImage image, ReleaseImageCallback&& release)>;
   using ReleaseBitmapCallback = std::function<void(Bitmap bitmap)>;
+  using DecodeResult = std::pair<Bitmap, ReleaseBitmapCallback>;
   
   virtual void request(RequestId rid,
                        const RequestInfo& requestInfo,
                        RequestCallback&& callback) = 0;
   virtual void cancel(RequestId rid) = 0;
   
-  virtual std::pair<Bitmap, ReleaseBitmapCallback> decode(PlatformImage image, int frameIndex = 0) = 0;
+  virtual DecodeResult decode(PlatformImage image, int frameIndex = 0) = 0;
+
+  virtual bool shouldEvaluateDeviceStatus() = 0;
+  virtual void evaluateDeviceStatus(uint32_t& cpuCoreCount, uint64_t& maxMemroyUsing) = 0;
 };
 
 ALICDN_IMAGE_EXPORT extern void SetAliCDNImageAdapter(AliCDNImageAdapter* adapter);
