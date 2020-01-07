@@ -57,6 +57,8 @@ private:
   
   void releasePlatformImage();
   void getNextMultiframe(Dart_Handle callback);
+  
+  void logError(const char* message) const;
 };
 
 extern void InitializeAliCDNImageManager(const TaskRunners& runners,

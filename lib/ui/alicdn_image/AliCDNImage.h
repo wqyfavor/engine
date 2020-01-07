@@ -96,6 +96,10 @@ public:
 
   virtual bool shouldEvaluateDeviceStatus() = 0;
   virtual void evaluateDeviceStatus(uint32_t& cpuCoreCount, uint64_t& maxMemroyUsing) = 0;
+    
+    
+  enum class LogLevel { Debug, Info, Warn, Error };
+  virtual void log(LogLevel level, const char* string) {}
 };
 
 ALICDN_IMAGE_EXPORT extern void SetAliCDNImageAdapter(AliCDNImageAdapter* adapter);
