@@ -31,6 +31,7 @@ public:
   
   // Cancel image request from platform.
   void cancel();
+  bool isCanceled();
 
 private:
   std::unique_ptr<AliCDNImageAdapter::RequestInfo> descriptor_;
@@ -38,6 +39,7 @@ private:
   enum class Status { New, Downloading, Complete };
   Status status_ = Status::New;
   
+  std::atomic<bool> canceled_ = false;
   fml::RefPtr<FrameInfo> cachedFrame_;
   std::vector<DartPersistentValue> callbacks_;
   

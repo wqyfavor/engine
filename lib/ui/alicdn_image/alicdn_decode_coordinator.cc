@@ -42,8 +42,7 @@ void AliCDNDecodeCoordinator::updateCapacity(uint32_t maxConcurrentCount, uint64
 bool AliCDNDecodeCoordinator::allowToRun(uint64_t memoryUsing) {
   uint64_t memoryUsed = memoryUsed_.load();
   uint32_t taskRunning = taskRunning_.load();
-  return (memoryUsing + memoryUsed <= maxMemoryUsing_ && taskRunning < maxConcurrentCount_) ||
-    (memoryUsing > maxMemoryUsing_ && taskRunning == 0);
+  return (memoryUsing + memoryUsed <= maxMemoryUsing_ && taskRunning < maxConcurrentCount_) || (taskRunning == 0);
 }
 
 void AliCDNDecodeCoordinator::runTask(uint64_t memoryUsing, const fml::closure& task) {
